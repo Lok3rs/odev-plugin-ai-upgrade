@@ -328,7 +328,7 @@ class UpgradeCommand(DatabaseCommand, ListLocalDatabasesMixin, AICommandMixin):
 
         # Prepare environment for required versions.
         # Source Odoo is usually researched via git history, so only target is often needed.
-        self._prepare_worktrees([target_ver])
+        self._prepare_odoo_environment([target_ver])
 
         prompt = self._build_final_prompt(
             from_ver, target_ver, from_odoo_path, target_odoo_path, target_db, upgrade_instructions
@@ -363,14 +363,6 @@ class UpgradeCommand(DatabaseCommand, ListLocalDatabasesMixin, AICommandMixin):
             "migrations for the modules you are upgrading. Use `grep` or `git grep` within this directory "
             "to find mentions of your module or specific fields/methods that have changed."
         )
-
-    def _prepare_worktrees(self, versions: list[str]) -> None:
-        """Ensure all required Odoo worktrees are present and up to date."""
-        for version in versions:
-            logger.info(f"Preparing environment for Odoo {version}...")
-            if not (self.odev.worktrees_path / version).exists():
-                self.odev.run_command("worktree", "-C", version, "-V", version)
-            self.odev.run_command("pull", "-V", version)
 
     def _setup_knowledge_index_context(
         self,
