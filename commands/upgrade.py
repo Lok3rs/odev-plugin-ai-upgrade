@@ -611,7 +611,6 @@ Your task is to upgrade multiple Odoo modules from version {from_ver} to {target
             version=target_ver,
             resume=self.args.resume,
             path_mapping=path_mapping,
-            ephemeral_pg=True,
         ):
             return
 

@@ -68,9 +68,11 @@ This skill provides instructions on how to use `odev` (Odoo Development CLI) dur
     -   Hot-deploys a module to a **running** Odoo instance.
     -   **Example**: `odev deploy /custom/my_module`
 
--   **`odev upgrade-code <database> --from <ver> --to <ver>`**:
+-   **`odev upgrade-code <database> --from <ver> --to <ver> --glob="my_module/**/\*"`\*\*:
     -   Automatically migrates source code for common renames (e.g., `<tree>` to `<list>` in Odoo 18.0+).
     -   **MANDATORY**: You MUST specify the **target database name**, not a directory path.
+    -   **MANDATORY**: You MUST always wrap the glob pattern in double quotes to prevent the shell from expanding it
+        before it reaches `odev`.
 
 ## Best Practices
 
