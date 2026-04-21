@@ -293,18 +293,13 @@ class UpgradeCommand(DatabaseCommand, ListLocalDatabasesMixin, AICommandMixin):
 
     def _prepare_upgrade(
         self,
-    ) -> (tuple[str, list[str], list[str], str, str, str, "KnowledgeIndex | None", list[dict], dict[str, str]] | None):
+    ) -> tuple[str, list[str], list[str], str, str, str, "KnowledgeIndex | None", list[dict]]:
         """Prepare the upgrade environment and generate the AI prompt."""
         from_ver, target_ver = self._detect_versions()
         project_path = Path(self.args.path).resolve()
         worktrees_path = self.odev.worktrees_path.resolve()
         venvs_path = self.odev.venvs_path.resolve()
         upgrade_path = self.config.paths.upgrade.resolve()
-
-        path_mapping = {
-            str(project_path): "/custom",
-            str(upgrade_path): "/upgrade",
-        }
 
         target_db, sandbox_dirs, extra_bind_dirs = self._get_sandbox_config(
             target_ver, project_path, worktrees_path, venvs_path
@@ -317,9 +312,7 @@ class UpgradeCommand(DatabaseCommand, ListLocalDatabasesMixin, AICommandMixin):
         )
         target_odoo_path = str(worktrees_path / target_ver)
 
-        ki, knowledge_local_path = self._setup_knowledge_index_context(
-            modules_info, from_ver, target_ver, upgrade_path, path_mapping
-        )
+        ki, knowledge_local_path = self._setup_knowledge_index_context(modules_info, from_ver, target_ver, upgrade_path)
         if knowledge_local_path:
             sandbox_dirs.append(f"{knowledge_local_path}:/knowledge")
 
@@ -343,7 +336,6 @@ class UpgradeCommand(DatabaseCommand, ListLocalDatabasesMixin, AICommandMixin):
             target_db,
             ki,
             modules_info,
-            path_mapping,
         )
 
     def _setup_upgrade_instructions(self, upgrade_path: Path, extra_bind_dirs: list[str]) -> str:
@@ -370,7 +362,6 @@ class UpgradeCommand(DatabaseCommand, ListLocalDatabasesMixin, AICommandMixin):
         from_ver: str,
         target_ver: str,
         upgrade_path: Path,
-        path_mapping: dict[str, str],
     ) -> tuple["KnowledgeIndex | None", str | None]:
         """Setup KnowledgeIndex."""
         from odev.common.store.datastore import DataStore
@@ -392,7 +383,6 @@ class UpgradeCommand(DatabaseCommand, ListLocalDatabasesMixin, AICommandMixin):
                 logger.warning(f"Knowledge index: no standard Odoo dependencies found for {from_ver}.")
 
             local_path = ki.local_path.as_posix()
-            path_mapping[local_path] = "/knowledge"
             return ki, local_path
         except Exception as e:
             logger.warning(f"Knowledge index unavailable: {e}. Proceeding without it.")
@@ -538,6 +528,8 @@ Your task is to upgrade multiple Odoo modules from version {from_ver} to {target
             logger.info(f"Creating empty host database {target_db!r} for upgrade...")
             target_db_obj.create()
 
+        self._ensure_database_safety(target_db)
+
     def _verification_loop(self, agent, modules_to_test: str, target_db: str, target_ver: str):
         """Run verification tests and offer AI-fixes in a loop."""
         session_id = (self.args.resume or agent.get_latest_session_id()) if agent else None
@@ -594,7 +586,6 @@ Your task is to upgrade multiple Odoo modules from version {from_ver} to {target
             target_db,
             ki,
             modules_info,
-            path_mapping,
         ) = prepared
         self._target_db = target_db
         agent = self.get_ai_agent()
@@ -610,7 +601,6 @@ Your task is to upgrade multiple Odoo modules from version {from_ver} to {target
             database=target_db,
             version=target_ver,
             resume=self.args.resume,
-            path_mapping=path_mapping,
         ):
             return
 
