@@ -431,7 +431,10 @@ Your task is to upgrade multiple Odoo modules from version {from_ver} to {target
 - **Target Odoo**: Version {target_ver} at `{target_odoo_path}`.
 - **Project Root**: `/custom`
 - **Target Database**: `{target_db}` (Use this for all installations and tests).
-- **Upgrade Knowledge Base**: `/knowledge` (Read/Write access). This directory contains markdown files for standard Odoo modules (e.g., `sale.md`, `account.md`) documented by the upgrade team. Each file contains notes for various version jumps (e.g. `## {from_ver} → {target_ver}`). You MUST read relevant files in `/knowledge` to understand known breaking changes and migration strategies before starting your upgrade work.{upgrade_instructions}
+- **Upgrade Knowledge Base**: `/knowledge` (Read/Write access). This directory contains hierarchical notes for standard Odoo modules.
+  - Structure: `/knowledge/<module_name>/<from_ver>_to_<to_ver>.md`.
+  - Format: Each file contains a table with `Title | Explanation | Commit id`.
+  - **MANDATORY**: Read relevant files in `/knowledge` before starting your upgrade work. Refer to existing entries to understand known breaking changes.{upgrade_instructions}
 
 ### Standard Odoo Migration Rules:
 - For Odoo >= 18.0, use `odev upgrade-code --from {from_ver} --to {target_ver} {target_db}`.
@@ -448,6 +451,7 @@ Your task is to upgrade multiple Odoo modules from version {from_ver} to {target
    - **Quality Audit**: Prioritize REPLACING old custom patterns with {target_ver} standards.{instructions}
    - **Data Migrations**: Create scripts in `migrations/{target_ver}/` using `from odoo.upgrade import util`.
    - **Comprehensive Impact Analysis**: Group related changes (model + view) into atomic commits.
+   - **Filtering (CRITICAL)**: Only document and commit relevant changes from the module itself. DO NOT document generic framework changes (e.g., "tree to list" UI changes) in the module-specific knowledge base unless the change originated in that specific module.
 3. **Verification**:
    {fast_verify}
    - **Log Audit**: Check for `Registry` load failures, `TypeError`, or `AttributeError`.
@@ -459,7 +463,9 @@ Your task is to upgrade multiple Odoo modules from version {from_ver} to {target
    - **Body**: Detailed description. Cite "Source" (Commit ID, PR, or Core file path).
 
 ### 📓 Knowledge Write-Back & Reporting (MANDATORY)
-1. **Knowledge Base**: Update `/knowledge/<dep_module>.md` with technical findings.
+1. **Knowledge Base**: Update `/knowledge/<dep_module>/<from_ver>_to_<to_ver>.md` with technical findings.
+   - **Format**: Use a markdown table: `| Title | Explanation | Commit id |`.
+   - **Commit id**: Must be the SHA from Odoo, Enterprise, or the upgrade repository.
 2. **Upgrade Log**: Update `UPGRADE.md`. Cite Source (Commit ID, PR, or Core file path).
 3. **Task Tracking**: Mark items as `[x]` in `TASKS.md`.
 """

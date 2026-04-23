@@ -2,7 +2,6 @@
 
 import json
 import re
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -27,24 +26,11 @@ Type: {type}
 """
 
 KNOWLEDGE_SECTION_TEMPLATE = """\
-## {from_ver} → {to_ver}
-Reviewed: false
-Last Updated: {date}
+# {from_ver} → {to_ver}
 
-### Field Changes
-<!-- List renamed, removed, or moved fields. Include model name and migration util hint. -->
-
-### Method / API Changes
-<!-- List removed/renamed methods, changed signatures, or new required overrides. -->
-
-### Framework / View Changes
-<!-- List structural changes: QWeb, Kanban card rewrite, JS hooks, OWL components, etc. -->
-
-### Migration Script Notes
-<!-- Specific `util.*` calls recommended for this module's data migration, if any. -->
-
-### Notes / Tips
-<!-- Any other upgrade-relevant observations discovered during real upgrades. -->
+| Title | Explanation | Commit id (Odoo/Enterprise or upgrade) |
+| :--- | :--- | :--- |
+| | | |
 
 ---
 
@@ -344,15 +330,19 @@ class KnowledgeIndex:
         entries: dict[str, list[str]] = {}
 
         if self._knowledge_dir.exists():
-            for module_file in sorted(self._knowledge_dir.iterdir()):
-                if not module_file.is_file() or module_file.suffix != ".md":
+            for module_dir in sorted(self._knowledge_dir.iterdir()):
+                if not module_dir.is_dir() or module_dir.name.startswith("."):
                     continue
-                module = module_file.stem
-                content = module_file.read_text()
-                # Find all "## from -> to" headers
-                pairs = re.findall(r"^##\s+([\w.]+)\s+→\s+([\w.]+)", content, re.MULTILINE)
-                if pairs:
-                    entries[module] = [f"{f}-{t}" for f, t in pairs]
+                module = module_dir.name
+                module_entries = []
+                for jump_file in sorted(module_dir.glob("*.md")):
+                    # filename is {from}_to_{to}.md
+                    match = re.match(r"([\w.]+)_to_([\w.]+)\.md", jump_file.name)
+                    if match:
+                        from_v, to_v = match.groups()
+                        module_entries.append(f"{from_v}-{to_v}")
+                if module_entries:
+                    entries[module] = module_entries
 
         data["entries"] = entries
         self._save_index(data)
@@ -370,33 +360,27 @@ class KnowledgeIndex:
         """
         missing: dict[str, list[tuple[str, str]]] = {}
         for module in modules:
-            file_path = self._knowledge_dir / f"{module}.md"
-            content = file_path.read_text() if file_path.exists() else ""
-
             for from_ver, to_ver in version_pairs.get(module, []):
-                # Search for the specific version jump header in the consolidated file
-                header_pattern = rf"^##\s+{re.escape(from_ver)}\s+→\s+{re.escape(to_ver)}"
-                if not re.search(header_pattern, content, re.MULTILINE):
+                file_path = self._knowledge_dir / module / f"{from_ver}_to_{to_ver}.md"
+                if not file_path.exists():
                     missing.setdefault(module, []).append((from_ver, to_ver))
                     continue
 
-                # If the header exists, check for meaningful content in that section
-                # Section ends at next "##" or "---" or EOF
-                section_match = re.search(rf"{header_pattern}.*?(?=\n##|\n---|$)", content, re.DOTALL | re.MULTILINE)
-                if section_match:
-                    section_content = section_match.group(0)
-                    meaningful_lines = [
-                        ln
-                        for ln in section_content.splitlines()
-                        if ln.strip()
-                        and not ln.startswith("#")
-                        and not ln.startswith("---")
-                        and not ln.startswith("<!--")
-                        and not ln.strip().lower().startswith("reviewed:")
-                        and not ln.strip().lower().startswith("last updated:")
-                    ]
-                    if not meaningful_lines:
-                        missing.setdefault(module, []).append((from_ver, to_ver))
+                # Check for meaningful content in the file
+                content = file_path.read_text()
+                meaningful_lines = [
+                    ln
+                    for ln in content.splitlines()
+                    if ln.strip()
+                    and not ln.startswith("#")
+                    and not ln.startswith("---")
+                    and not (
+                        ln.startswith("|")
+                        and (":---" in ln or "Title | Explanation" in ln or not ln.strip("| ").strip())
+                    )
+                ]
+                if not meaningful_lines:
+                    missing.setdefault(module, []).append((from_ver, to_ver))
 
         return missing
 
@@ -413,35 +397,20 @@ class KnowledgeIndex:
         Returns a list of updated file paths.
         """
         updated_files: list[Path] = []
-        today = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
-
         for module, pairs in missing.items():
-            file_path = self._knowledge_dir / f"{module}.md"
-            self._knowledge_dir.mkdir(parents=True, exist_ok=True)
-
-            if not file_path.exists():
-                module_type = (modules_types or {}).get(module, "community")
-                file_path.write_text(KNOWLEDGE_MODULE_HEADER.format(module=module, type=module_type))
-
-            content = file_path.read_text()
-            new_sections = []
             for from_ver, to_ver in pairs:
-                # Double-check we are not duplicating.
-                header_pattern = rf"^##\s+{re.escape(from_ver)}\s+→\s+{re.escape(to_ver)}"
-                if not re.search(header_pattern, content, re.MULTILINE):
-                    new_sections.append(
+                file_path = self._knowledge_dir / module / f"{from_ver}_to_{to_ver}.md"
+                file_path.parent.mkdir(parents=True, exist_ok=True)
+
+                if not file_path.exists():
+                    file_path.write_text(
                         KNOWLEDGE_SECTION_TEMPLATE.format(
                             from_ver=from_ver,
                             to_ver=to_ver,
-                            date=today,
                         )
                     )
-
-            if new_sections:
-                with file_path.open("a") as f:
-                    f.write("\n".join(new_sections))
-                logger.debug(f"Added {len(new_sections)} knowledge sections to: {file_path}")
-                updated_files.append(file_path)
+                    logger.debug(f"Created knowledge stub: {file_path}")
+                    updated_files.append(file_path)
 
         if updated_files:
             self._update_index_json()
@@ -463,19 +432,12 @@ class KnowledgeIndex:
         sections: dict[tuple[str, str], list[str]] = {}
 
         for module in modules:
-            file_path = self._knowledge_dir / f"{module}.md"
-            if not file_path.exists():
-                continue
-
-            content = file_path.read_text()
             for from_ver, to_ver in version_pairs.get(module, []):
-                header_pattern = rf"^##\s+{re.escape(from_ver)}\s+→\s+{re.escape(to_ver)}"
-                # Extract section: from header up to next "##" or "---"
-                section_match = re.search(rf"({header_pattern}.*?)(?=\n##|\n---|$)", content, re.DOTALL | re.MULTILINE)
-                if not section_match:
+                file_path = self._knowledge_dir / module / f"{from_ver}_to_{to_ver}.md"
+                if not file_path.exists():
                     continue
 
-                section_text = section_match.group(1).strip()
+                section_text = file_path.read_text().strip()
 
                 # Check if it has any real notes besides the header/stub metadata
                 meaningful_lines = [
@@ -484,9 +446,10 @@ class KnowledgeIndex:
                     if ln.strip()
                     and not ln.startswith("#")
                     and not ln.startswith("---")
-                    and not ln.startswith("<!--")
-                    and not ln.strip().lower().startswith("reviewed:")
-                    and not ln.strip().lower().startswith("last updated:")
+                    and not (
+                        ln.startswith("|")
+                        and (":---" in ln or "Title | Explanation" in ln or not ln.strip("| ").strip())
+                    )
                 ]
                 if not meaningful_lines:
                     continue
@@ -494,7 +457,9 @@ class KnowledgeIndex:
                 if len(section_text) > max_chars_per_entry:
                     section_text = section_text[:max_chars_per_entry] + "\n\n_[truncated]_"
 
-                sections.setdefault((from_ver, to_ver), []).append(f"#### `{module}` Upgrade Context\n\n{section_text}")
+                sections.setdefault((from_ver, to_ver), []).append(
+                    f"#### `{module}` Upgrade Context ({from_ver} → {to_ver})\n\n{section_text}"
+                )
 
         if not sections:
             return ""
