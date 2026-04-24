@@ -605,6 +605,16 @@ Your task is to upgrade Odoo modules from version {from_ver} to {target_ver}.
         self._ensure_target_db(target_db)
 
         logger.info(f"Starting Project-wide AI Upgrade: from {from_ver} to {target_ver} ({target_db})")
+
+        # Check for missing upgrade skills via npx skills list -g
+        loaded_skills = self._get_loaded_skills()
+        missing = [s for s in ["odoo_upgrade_utils", "custom_util"] if s not in loaded_skills]
+        if missing:
+            logger.warning(
+                f"Missing upgrade skills: {', '.join(missing)}. "
+                "To load them, run: npx skills add odoo-ps/ps-ai-skills --skills odoo_upgrade_utils,custom_util"
+            )
+
         if not agent.run(
             prompt,
             sandbox_dirs,
