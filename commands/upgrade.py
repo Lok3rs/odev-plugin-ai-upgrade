@@ -5,6 +5,7 @@ import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import jinja2
 import networkx as nx
 
 from odev.common import args, progress
@@ -412,87 +413,26 @@ class UpgradeCommand(DatabaseCommand, ListLocalDatabasesMixin, AICommandMixin):
         repo_name = project_path.name
         is_ps_custom = repo_name.startswith("ps") and repo_name.endswith("-custom")
 
-        if is_ps_custom:
-            fast_verify = (
-                "- **Verification**: Verify the module(s) install cleanly using: "
-                "`odev deploy <module_name>`. (Assume one instance is already running with `odev run`). "
-                "Then, verify the presence of new fields or view rendering."
-            )
-        else:
-            fast_verify = (
-                "- **Verification**: You are responsible for creating your test environment. "
-                f"Use `odev run` (Target DB: `{target_db}`) to verify that the modules install cleanly. "
-                "You may need to create or clone a base database first if it doesn't exist."
-            )
+        template_path = Path(__file__).parent.parent / "templates" / "upgrade_prompt.md.j2"
+        with open(template_path, "r", encoding="utf-8") as f:
+            template_content = f.read()
 
-        instructions = ""
-        if not self.args.no_ruff:
-            instructions = " You MUST run `ruff check --fix <file>` after editing any Python file."
-
-        k_path = knowledge_path or "/knowledge"
-
-        full_prompt = f"""You are an expert Odoo Upgrade Lead.
-Your task is to upgrade Odoo modules from version {from_ver} to {target_ver}.
-
-### Context:
-- **Source Odoo**: Version {from_ver} at `{from_odoo_path}`.
-- **Target Odoo**: Version {target_ver} at `{target_odoo_path}`.
-- **Project Root**: `{project_path}` (Contains all modules to upgrade).
-- **Upgrade Knowledge Base**: `{k_path}` (Read/Write access). This directory contains hierarchical notes for standard Odoo modules.
-  - Structure: `{k_path}/<module_name>/<from_ver>_to_<to_ver>.md`.
-  - Format: Each file contains a table with `Title | Explanation | Commit id`.
-  - **MANDATORY**: Read relevant files in `{k_path}` before starting your upgrade work. Refer to existing entries to understand known breaking changes.{upgrade_instructions}
-
-### Standard Odoo Migration Rules:
-- **Automated Refactoring**: For Odoo >= 18.0, use `odev upgrade-code`.
-- Search for version-specific migration scripts in `odoo/odoo/upgrade_code` within Core.
-- **MANDATORY**: Refer to the following Skills for available migration helpers and CLI usage:
-  - **Standard Odoo Upgrade Helpers**: `odoo_upgrade_utils`
-  - **PS Custom Helpers**: `custom_util`
-  - **ODEV CLI Usage**: `odev`
-
-### Your Process:
-1. **Phase 1: Proactive Impact Analysis (MANDATORY)**:
-   - For the **current** module being upgraded, map every override (Model, View, Method, Field).
-   - **Pinpoint the Change**: Identify the **EXACT** version jump where the change occurred.
-     * **Sequential Analysis**: Do not just check the final version. Scan intermediate versions (e.g., if upgrading 16.0->19.0, check 16.0->17.0, then 17.0->18.0, then 18.0->19.0).
-     * Use `git log {from_ver}..{target_ver} -L :method_name:file_path` to find the **first** commit that introduced the change.
-     * Use `git diff {from_ver}..{target_ver} -- file_path` to identify structural changes.
-   - **Identify the "Why"**: If a field is missing, search the git history to find its new location or replacement.
-   - **Document findings** in `TASKS.md` (checklists and technical notes) before starting any code changes.
-2. **Phase 2: Execution & Adaptation**:
-   - **Quality Audit**: Replace old custom patterns with {target_ver} standards based on your Phase 1 findings.{instructions}
-   - **Data Migrations**: Create scripts in `migrations/{target_ver}/` using `from odoo.upgrade import util`.
-   - **Atomic Integrity**: Group related changes (model + view) into atomic commits.
-   - **Filtering (CRITICAL)**: Only document and commit relevant changes from the module itself. DO NOT document generic framework changes in the module-specific knowledge base.
-3. **Verification**:
-   {fast_verify}
-   - **Log Audit**: Check for `Registry` load failures, `TypeError`, or `AttributeError`.
-   - **Test Intent Preservation**: Keep existing tests but adapt syntax for the new version.
-
-### Committing Rules:
-1. **One commit per discrete change or fix**.
-2. **Format**: `[UPG][{self.args.task_id}] module_name: Concise description`
-   - **Body**: Detailed description. Cite "Source" (Commit ID, PR, or Core file path).
-
-### 📓 Knowledge Write-Back & Reporting (MANDATORY)
-1. **Knowledge Base**: Update the **specific** version file in `{k_path}/<dep_module>/`.
-   - **Filename Rule**: Document the change in the file representing the **minimal** jump where it first appeared (e.g., `{k_path}/account/16.0_to_17.0.md` even if your session is `16.0_to_19.0`).
-   - **Format**: Use a markdown table: `| Title | Explanation | Commit id |`.
-   - **Commit id (MANDATORY)**: You **MUST** find and include the SHA from Odoo, Enterprise, or the upgrade repository. **Leaving this empty is unacceptable.** If a commit is hard to find, search harder using `git log -S` or `git blame`.
-2. **Upgrade Log**: Update `UPGRADE.md`. Cite Source (Commit ID, PR, or Core file path).
-3. **Task Tracking**: Mark items as `[x]` in `TASKS.md`.
-"""
-        if self.args.comment:
-            full_prompt += f"\n### Additional User Instructions:\n- {self.args.comment}\n"
-
-        if self.args.submodules:
-            full_prompt += (
-                "\n- **Submodules Usage**: You are authorized to upgrade modules found in git submodules. "
-                "Ensure you commit changes within the respective submodule repositories.\n"
-            )
-
-        return full_prompt
+        template = jinja2.Template(template_content)
+        return template.render(
+            from_ver=from_ver,
+            target_ver=target_ver,
+            from_odoo_path=from_odoo_path,
+            target_odoo_path=target_odoo_path,
+            project_path=project_path,
+            target_db=target_db,
+            upgrade_instructions=upgrade_instructions,
+            k_path=knowledge_path or "/knowledge",
+            no_ruff=self.args.no_ruff,
+            is_ps_custom=is_ps_custom,
+            task_id=self.args.task_id,
+            comment=self.args.comment,
+            submodules=self.args.submodules,
+        )
 
     def _check_git_safety(self, repo_path: Path):
         """Perform git safety checks on the repository."""
