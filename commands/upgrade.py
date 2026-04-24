@@ -259,7 +259,7 @@ class UpgradeCommand(DatabaseCommand, ListLocalDatabasesMixin, AICommandMixin):
         )
         target_db = f"{base_db_name}_{target_ver.replace('.', '_')}_upgrade"
 
-        sandbox_dirs = [f"{project_path}:/custom"]
+        sandbox_dirs = [str(project_path)]
         extra_bind_dirs = [
             f"{worktrees_path}:{worktrees_path}",
             f"{venvs_path}:{venvs_path}",
@@ -287,6 +287,9 @@ class UpgradeCommand(DatabaseCommand, ListLocalDatabasesMixin, AICommandMixin):
                 logger.warning(f"Could not find submodules in {self.args.path}: {e}")
 
         modules_info = self._get_sorted_modules(search_paths)
+        if self.args.module_name:
+            modules_info = [m for m in modules_info if m["name"] == self.args.module_name]
+
         if not modules_info:
             raise self.error(f"No modules found in search paths: {[str(p) for p in search_paths]}")
         return modules_info
@@ -321,7 +324,7 @@ class UpgradeCommand(DatabaseCommand, ListLocalDatabasesMixin, AICommandMixin):
 
         # Prepare environment for required versions.
         # Source Odoo is usually researched via git history, so only target is often needed.
-        self._prepare_odoo_environment([target_ver])
+        self._prepare_odoo_environment([from_ver, target_ver])
 
         prompt = self._build_final_prompt(
             from_ver, target_ver, from_odoo_path, target_odoo_path, target_db, upgrade_instructions
@@ -398,18 +401,19 @@ class UpgradeCommand(DatabaseCommand, ListLocalDatabasesMixin, AICommandMixin):
         upgrade_instructions: str,
     ) -> str:
         """Compose the full AI prompt from various components."""
-        repo_name = Path(self.args.path).resolve().name
+        project_path = Path(self.args.path).resolve()
+        repo_name = project_path.name
         is_ps_custom = repo_name.startswith("ps") and repo_name.endswith("-custom")
 
         if is_ps_custom:
             fast_verify = (
-                "- **Verification (Fast)**: Verify the module installs cleanly using: "
+                "- **Verification (Fast)**: Verify the module(s) install cleanly using: "
                 "`odev deploy <module_name>`. (Assume one instance is already running with `odev run`). "
                 "Then, verify the presence of new fields or view rendering."
             )
         else:
             fast_verify = (
-                f"- **Verification (Fast)**: Verify the module installs cleanly (including demo data) "
+                "- **Verification (Fast)**: Verify the module(s) install cleanly (including demo data) "
                 f"using: `odev run` (Target DB: `{target_db}`). "
                 "Then, verify the presence of new fields, view rendering, or basic logic via a minimal manual check."
             )
@@ -419,25 +423,19 @@ class UpgradeCommand(DatabaseCommand, ListLocalDatabasesMixin, AICommandMixin):
             instructions = " You MUST run `ruff check --fix <file>` after editing any Python file."
 
         full_prompt = f"""You are an expert Odoo Upgrade Lead.
-Your task is to upgrade multiple Odoo modules from version {from_ver} to {target_ver}.
-
-### Core Protocol:
-1. **Efficiency Protocol**: Skip narrating routine discovery steps.
-2. **Expert Autonomy**: Align with Target Odoo {target_ver} core standards.
-3. **Atomic Integrity**: Update all Python, XML, and JS references in a single atomic commit.
+Your task is to upgrade Odoo modules from version {from_ver} to {target_ver}.
 
 ### Context:
 - **Source Odoo**: Version {from_ver} at `{from_odoo_path}`.
 - **Target Odoo**: Version {target_ver} at `{target_odoo_path}`.
-- **Project Root**: `/custom`
-- **Target Database**: `{target_db}` (Use this for all installations and tests).
+- **Project Root**: `{project_path}` (Contains all modules to upgrade).
 - **Upgrade Knowledge Base**: `/knowledge` (Read/Write access). This directory contains hierarchical notes for standard Odoo modules.
   - Structure: `/knowledge/<module_name>/<from_ver>_to_<to_ver>.md`.
   - Format: Each file contains a table with `Title | Explanation | Commit id`.
   - **MANDATORY**: Read relevant files in `/knowledge` before starting your upgrade work. Refer to existing entries to understand known breaking changes.{upgrade_instructions}
 
 ### Standard Odoo Migration Rules:
-- For Odoo >= 18.0, use `odev upgrade-code --from {from_ver} --to {target_ver} {target_db}`.
+- **Automated Refactoring**: For Odoo >= 18.0, use `odev upgrade-code`.
 - Search for version-specific migration scripts in `odoo/odoo/upgrade_code` within Core.
 - **MANDATORY**: Refer to the following Skills for available migration helpers and CLI usage:
   - **Standard Odoo Upgrade Helpers**: `/skills/odoo_upgrade_utils`
@@ -445,13 +443,19 @@ Your task is to upgrade multiple Odoo modules from version {from_ver} to {target
   - **ODEV CLI Usage**: `/skills/odev`
 
 ### Your Process:
-1. **Analyze & Plan**: Maintain a `TASKS.md` in the root with a detailed checklist.
-2. **Research & Execution**:
-   - **Deep Git Research**: In Target Odoo, research changes (`git log -S`, `git show`).
-   - **Quality Audit**: Prioritize REPLACING old custom patterns with {target_ver} standards.{instructions}
+1. **Phase 1: Proactive Impact Analysis (MANDATORY)**:
+   - For the **current** module being upgraded, map every override (Model, View, Method, Field).
+   - **Pinpoint the Change**: Identify the **EXACT** version jump where the change occurred.
+     * **Sequential Analysis**: Do not just check the final version. Scan intermediate versions (e.g., if upgrading 16.0->19.0, check 16.0->17.0, then 17.0->18.0, then 18.0->19.0).
+     * Use `git log {from_ver}..{target_ver} -L :method_name:file_path` to find the **first** commit that introduced the change.
+     * Use `git diff {from_ver}..{target_ver} -- file_path` to identify structural changes.
+   - **Identify the "Why"**: If a field is missing, search the git history to find its new location or replacement.
+   - **Document findings** in `TASKS.md` (checklists and technical notes) before starting any code changes.
+2. **Phase 2: Execution & Adaptation**:
+   - **Quality Audit**: Replace old custom patterns with {target_ver} standards based on your Phase 1 findings.{instructions}
    - **Data Migrations**: Create scripts in `migrations/{target_ver}/` using `from odoo.upgrade import util`.
-   - **Comprehensive Impact Analysis**: Group related changes (model + view) into atomic commits.
-   - **Filtering (CRITICAL)**: Only document and commit relevant changes from the module itself. DO NOT document generic framework changes (e.g., "tree to list" UI changes) in the module-specific knowledge base unless the change originated in that specific module.
+   - **Atomic Integrity**: Group related changes (model + view) into atomic commits.
+   - **Filtering (CRITICAL)**: Only document and commit relevant changes from the module itself. DO NOT document generic framework changes in the module-specific knowledge base.
 3. **Verification**:
    {fast_verify}
    - **Log Audit**: Check for `Registry` load failures, `TypeError`, or `AttributeError`.
@@ -463,9 +467,10 @@ Your task is to upgrade multiple Odoo modules from version {from_ver} to {target
    - **Body**: Detailed description. Cite "Source" (Commit ID, PR, or Core file path).
 
 ### 📓 Knowledge Write-Back & Reporting (MANDATORY)
-1. **Knowledge Base**: Update `/knowledge/<dep_module>/<from_ver>_to_<to_ver>.md` with technical findings.
+1. **Knowledge Base**: Update the **specific** version file in `/knowledge/<dep_module>/`.
+   - **Filename Rule**: Document the change in the file representing the **minimal** jump where it first appeared (e.g., `/knowledge/account/16.0_to_17.0.md` even if your session is `16.0_to_19.0`).
    - **Format**: Use a markdown table: `| Title | Explanation | Commit id |`.
-   - **Commit id**: Must be the SHA from Odoo, Enterprise, or the upgrade repository.
+   - **Commit id (MANDATORY)**: You **MUST** find and include the SHA from Odoo, Enterprise, or the upgrade repository. **Leaving this empty is unacceptable.** If a commit is hard to find, search harder using `git log -S` or `git blame`.
 2. **Upgrade Log**: Update `UPGRADE.md`. Cite Source (Commit ID, PR, or Core file path).
 3. **Task Tracking**: Mark items as `[x]` in `TASKS.md`.
 """
