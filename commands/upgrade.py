@@ -332,9 +332,9 @@ class UpgradeCommand(DatabaseCommand, ListLocalDatabasesMixin, AICommandMixin):
             target_ver,
             from_odoo_path,
             target_odoo_path,
-            target_db,
             upgrade_instructions,
             knowledge_local_path,
+            modules_info,
         )
 
         return (
@@ -404,9 +404,9 @@ class UpgradeCommand(DatabaseCommand, ListLocalDatabasesMixin, AICommandMixin):
         target_ver: str,
         from_odoo_path: str,
         target_odoo_path: str,
-        target_db: str,
         upgrade_instructions: str,
         knowledge_path: str | None,
+        modules_info: list[dict],
     ) -> str:
         """Compose the full AI prompt from various components."""
         project_path = Path(self.args.path).resolve()
@@ -424,7 +424,6 @@ class UpgradeCommand(DatabaseCommand, ListLocalDatabasesMixin, AICommandMixin):
             from_odoo_path=from_odoo_path,
             target_odoo_path=target_odoo_path,
             project_path=project_path,
-            target_db=target_db,
             upgrade_instructions=upgrade_instructions,
             k_path=knowledge_path or "/knowledge",
             no_ruff=self.args.no_ruff,
@@ -432,6 +431,7 @@ class UpgradeCommand(DatabaseCommand, ListLocalDatabasesMixin, AICommandMixin):
             task_id=self.args.task_id,
             comment=self.args.comment,
             submodules=self.args.submodules,
+            modules=modules_info,
         )
 
     def _check_git_safety(self, repo_path: Path):
