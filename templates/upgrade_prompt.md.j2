@@ -53,7 +53,7 @@ Apply this workflow strictly for each module in the list above:
 #### Step 5: Final Validation (Clean Install & Tests) - MANDATORY
 A migration is NEVER considered finished by testing only on the current working database. You MUST prove that the module installs "out of the box" on a fresh environment:
 1. **Create a fresh DB**: `odev create -f -V {{ target_ver }} <test_db> -i base`.
-2. **Install & Test**: Run `odev test --ai -V {{ target_ver }} <test_db> -i {{ module.name }}`.
+2. **Install & Test**: Run `odev test --ai -V {{ target_ver }} <test_db> -i <module_name>`.
 3. **Handle Failures**: If this command fails, let the AI agent within `odev test --ai` attempt to fix it, or analyze the logs yourself, fix the code, and **RESTART** the verification on a NEW clean database.
 
 #### Step 6: Knowledge Base Synchronization (Final Phase)
