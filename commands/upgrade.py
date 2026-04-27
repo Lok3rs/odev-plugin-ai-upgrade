@@ -5,6 +5,7 @@ import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import jinja2
 import networkx as nx
 
 from odev.common import args, progress
@@ -251,7 +252,7 @@ class UpgradeCommand(DatabaseCommand, ListLocalDatabasesMixin, AICommandMixin):
         worktrees_path: Path,
         venvs_path: Path,
     ) -> tuple[str, list[str], list[str]]:
-        """Configure target database and sandbox directories."""
+        """Configure target database name and sandbox directories."""
         base_db_name = (
             self._database.name
             if getattr(self, "_database", None) and self._database.platform.name != "dummy"
@@ -259,10 +260,10 @@ class UpgradeCommand(DatabaseCommand, ListLocalDatabasesMixin, AICommandMixin):
         )
         target_db = f"{base_db_name}_{target_ver.replace('.', '_')}_upgrade"
 
-        sandbox_dirs = [f"{project_path}:/custom"]
+        sandbox_dirs = [str(project_path)]
         extra_bind_dirs = [
-            f"{worktrees_path}:{worktrees_path}",
-            f"{venvs_path}:{venvs_path}",
+            str(worktrees_path),
+            str(venvs_path),
         ]
         return target_db, sandbox_dirs, extra_bind_dirs
 
@@ -287,6 +288,9 @@ class UpgradeCommand(DatabaseCommand, ListLocalDatabasesMixin, AICommandMixin):
                 logger.warning(f"Could not find submodules in {self.args.path}: {e}")
 
         modules_info = self._get_sorted_modules(search_paths)
+        if self.args.module_name:
+            modules_info = [m for m in modules_info if m["name"] == self.args.module_name]
+
         if not modules_info:
             raise self.error(f"No modules found in search paths: {[str(p) for p in search_paths]}")
         return modules_info
@@ -314,17 +318,23 @@ class UpgradeCommand(DatabaseCommand, ListLocalDatabasesMixin, AICommandMixin):
 
         ki, knowledge_local_path = self._setup_knowledge_index_context(modules_info, from_ver, target_ver, upgrade_path)
         if knowledge_local_path:
-            sandbox_dirs.append(f"{knowledge_local_path}:/knowledge")
+            sandbox_dirs.append(knowledge_local_path)
 
         if (self.args.path / "UPGRADE.md").exists():
             logger.info(f"Existing upgrade report found at {self.args.path / 'UPGRADE.md'}")
 
         # Prepare environment for required versions.
         # Source Odoo is usually researched via git history, so only target is often needed.
-        self._prepare_odoo_environment([target_ver])
+        self._prepare_odoo_environment([from_ver, target_ver])
 
         prompt = self._build_final_prompt(
-            from_ver, target_ver, from_odoo_path, target_odoo_path, target_db, upgrade_instructions
+            from_ver,
+            target_ver,
+            from_odoo_path,
+            target_odoo_path,
+            upgrade_instructions,
+            knowledge_local_path,
+            modules_info,
         )
 
         return (
@@ -346,11 +356,11 @@ class UpgradeCommand(DatabaseCommand, ListLocalDatabasesMixin, AICommandMixin):
                 upgrade_connector.clone()
             else:
                 upgrade_connector.pull(force=True)
-            extra_bind_dirs.append(f"{upgrade_path}:/upgrade")
+            extra_bind_dirs.append(str(upgrade_path))
 
         return (
-            "\n- **Migration Scripts (Upgrade Repository)**: You have access to the official Odoo Enterprise "
-            "migration scripts at `/upgrade`. This repository contains the logic used by Odoo's upgrade team. "
+            f"\n- **Migration Scripts (Upgrade Repository)**: You have access to the official Odoo Enterprise "
+            f"migration scripts at `{upgrade_path}`. This repository contains the logic used by Odoo's upgrade team. "
             "You MUST search this directory to understand how Odoo handles API changes, field renames, and model "
             "migrations for the modules you are upgrading. Use `grep` or `git grep` within this directory "
             "to find mentions of your module or specific fields/methods that have changed."
@@ -382,7 +392,7 @@ class UpgradeCommand(DatabaseCommand, ListLocalDatabasesMixin, AICommandMixin):
             else:
                 logger.warning(f"Knowledge index: no standard Odoo dependencies found for {from_ver}.")
 
-            local_path = ki.local_path.as_posix()
+            local_path = ki.local_path.resolve().as_posix()
             return ki, local_path
         except Exception as e:
             logger.warning(f"Knowledge index unavailable: {e}. Proceeding without it.")
@@ -394,91 +404,35 @@ class UpgradeCommand(DatabaseCommand, ListLocalDatabasesMixin, AICommandMixin):
         target_ver: str,
         from_odoo_path: str,
         target_odoo_path: str,
-        target_db: str,
         upgrade_instructions: str,
+        knowledge_path: str | None,
+        modules_info: list[dict],
     ) -> str:
         """Compose the full AI prompt from various components."""
-        repo_name = Path(self.args.path).resolve().name
+        project_path = Path(self.args.path).resolve()
+        repo_name = project_path.name
         is_ps_custom = repo_name.startswith("ps") and repo_name.endswith("-custom")
 
-        if is_ps_custom:
-            fast_verify = (
-                "- **Verification (Fast)**: Verify the module installs cleanly using: "
-                "`odev deploy <module_name>`. (Assume one instance is already running with `odev run`). "
-                "Then, verify the presence of new fields or view rendering."
-            )
-        else:
-            fast_verify = (
-                f"- **Verification (Fast)**: Verify the module installs cleanly (including demo data) "
-                f"using: `odev run` (Target DB: `{target_db}`). "
-                "Then, verify the presence of new fields, view rendering, or basic logic via a minimal manual check."
-            )
+        template_path = Path(__file__).parent.parent / "templates" / "upgrade_prompt.md.j2"
+        with open(template_path, "r", encoding="utf-8") as f:
+            template_content = f.read()
 
-        instructions = ""
-        if not self.args.no_ruff:
-            instructions = " You MUST run `ruff check --fix <file>` after editing any Python file."
-
-        full_prompt = f"""You are an expert Odoo Upgrade Lead.
-Your task is to upgrade multiple Odoo modules from version {from_ver} to {target_ver}.
-
-### Core Protocol:
-1. **Efficiency Protocol**: Skip narrating routine discovery steps.
-2. **Expert Autonomy**: Align with Target Odoo {target_ver} core standards.
-3. **Atomic Integrity**: Update all Python, XML, and JS references in a single atomic commit.
-
-### Context:
-- **Source Odoo**: Version {from_ver} at `{from_odoo_path}`.
-- **Target Odoo**: Version {target_ver} at `{target_odoo_path}`.
-- **Project Root**: `/custom`
-- **Target Database**: `{target_db}` (Use this for all installations and tests).
-- **Upgrade Knowledge Base**: `/knowledge` (Read/Write access). This directory contains hierarchical notes for standard Odoo modules.
-  - Structure: `/knowledge/<module_name>/<from_ver>_to_<to_ver>.md`.
-  - Format: Each file contains a table with `Title | Explanation | Commit id`.
-  - **MANDATORY**: Read relevant files in `/knowledge` before starting your upgrade work. Refer to existing entries to understand known breaking changes.{upgrade_instructions}
-
-### Standard Odoo Migration Rules:
-- For Odoo >= 18.0, use `odev upgrade-code --from {from_ver} --to {target_ver} {target_db}`.
-- Search for version-specific migration scripts in `odoo/odoo/upgrade_code` within Core.
-- **MANDATORY**: Refer to the following Skills for available migration helpers and CLI usage:
-  - **Standard Odoo Upgrade Helpers**: `/skills/odoo_upgrade_utils`
-  - **PS Custom Helpers**: `/skills/custom_util`
-  - **ODEV CLI Usage**: `/skills/odev`
-
-### Your Process:
-1. **Analyze & Plan**: Maintain a `TASKS.md` in the root with a detailed checklist.
-2. **Research & Execution**:
-   - **Deep Git Research**: In Target Odoo, research changes (`git log -S`, `git show`).
-   - **Quality Audit**: Prioritize REPLACING old custom patterns with {target_ver} standards.{instructions}
-   - **Data Migrations**: Create scripts in `migrations/{target_ver}/` using `from odoo.upgrade import util`.
-   - **Comprehensive Impact Analysis**: Group related changes (model + view) into atomic commits.
-   - **Filtering (CRITICAL)**: Only document and commit relevant changes from the module itself. DO NOT document generic framework changes (e.g., "tree to list" UI changes) in the module-specific knowledge base unless the change originated in that specific module.
-3. **Verification**:
-   {fast_verify}
-   - **Log Audit**: Check for `Registry` load failures, `TypeError`, or `AttributeError`.
-   - **Test Intent Preservation**: Keep existing tests but adapt syntax for the new version.
-
-### Committing Rules:
-1. **One commit per discrete change or fix**.
-2. **Format**: `[UPG][{self.args.task_id}] module_name: Concise description`
-   - **Body**: Detailed description. Cite "Source" (Commit ID, PR, or Core file path).
-
-### 📓 Knowledge Write-Back & Reporting (MANDATORY)
-1. **Knowledge Base**: Update `/knowledge/<dep_module>/<from_ver>_to_<to_ver>.md` with technical findings.
-   - **Format**: Use a markdown table: `| Title | Explanation | Commit id |`.
-   - **Commit id**: Must be the SHA from Odoo, Enterprise, or the upgrade repository.
-2. **Upgrade Log**: Update `UPGRADE.md`. Cite Source (Commit ID, PR, or Core file path).
-3. **Task Tracking**: Mark items as `[x]` in `TASKS.md`.
-"""
-        if self.args.comment:
-            full_prompt += f"\n### Additional User Instructions:\n- {self.args.comment}\n"
-
-        if self.args.submodules:
-            full_prompt += (
-                "\n- **Submodules Usage**: You are authorized to upgrade modules found in git submodules. "
-                "Ensure you commit changes within the respective submodule repositories.\n"
-            )
-
-        return full_prompt
+        template = jinja2.Template(template_content)
+        return template.render(
+            from_ver=from_ver,
+            target_ver=target_ver,
+            from_odoo_path=from_odoo_path,
+            target_odoo_path=target_odoo_path,
+            project_path=project_path,
+            upgrade_instructions=upgrade_instructions,
+            k_path=knowledge_path or "/knowledge",
+            no_ruff=self.args.no_ruff,
+            is_ps_custom=is_ps_custom,
+            task_id=self.args.task_id,
+            comment=self.args.comment,
+            submodules=self.args.submodules,
+            modules=modules_info,
+        )
 
     def _check_git_safety(self, repo_path: Path):
         """Perform git safety checks on the repository."""
@@ -512,29 +466,6 @@ Your task is to upgrade multiple Odoo modules from version {from_ver} to {target
                 raise self.error(f"Failed to create branch {branch_name!r}: {e}")
         else:
             raise self.error(f"Protected branch {connector.branch!r} detected. Feature branch required.")
-
-    def _ensure_target_db(self, target_db: str):
-        """Ensure target database exists on host before letting the AI work on it."""
-        from odev.common.databases import LocalDatabase
-
-        target_db_obj = LocalDatabase(target_db)
-        if target_db_obj.exists:
-            return
-
-        db_to_clone = (
-            self._database.name
-            if getattr(self, "_database", None) and self._database.platform.name != "dummy"
-            else None
-        )
-
-        if db_to_clone:
-            logger.info(f"Cloning host database {db_to_clone!r} to {target_db!r} for upgrade...")
-            target_db_obj.create(template=db_to_clone)
-        else:
-            logger.info(f"Creating empty host database {target_db!r} for upgrade...")
-            target_db_obj.create()
-
-        self._ensure_database_safety(target_db)
 
     def _verification_loop(self, agent, modules_to_test: str, target_db: str, target_ver: str):
         """Run verification tests and offer AI-fixes in a loop."""
@@ -597,9 +528,18 @@ Your task is to upgrade multiple Odoo modules from version {from_ver} to {target
         agent = self.get_ai_agent()
 
         self._cleanup_wizard(stage="pre-flight", exclude=[target_db])
-        self._ensure_target_db(target_db)
 
         logger.info(f"Starting Project-wide AI Upgrade: from {from_ver} to {target_ver} ({target_db})")
+
+        # Check for missing upgrade skills via npx skills list -g
+        loaded_skills = self._get_loaded_skills()
+        missing = [s for s in ["odoo_upgrade_utils", "custom_util"] if s not in loaded_skills]
+        if missing:
+            logger.warning(
+                f"Missing upgrade skills: {', '.join(missing)}. "
+                "To load them, run: npx skills add odoo-ps/ps-ai-skills --skills odoo_upgrade_utils,custom_util"
+            )
+
         if not agent.run(
             prompt,
             sandbox_dirs,
