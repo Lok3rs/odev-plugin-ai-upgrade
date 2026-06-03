@@ -467,21 +467,6 @@ class UpgradeCommand(DatabaseCommand, ListLocalDatabasesMixin, AICommandMixin):
         else:
             raise self.error(f"Protected branch {connector.branch!r} detected. Feature branch required.")
 
-    def _verification_loop(self, agent, modules_to_test: str, target_db: str, target_ver: str):
-        """Run verification tests and offer AI-fixes in a loop."""
-        session_id = (self.args.resume or agent.get_latest_session_id()) if agent else None
-        while self.console.confirm(
-            f"Would you like to run the full test suite for analysis? (Modules: {modules_to_test})",
-            default=True,
-        ):
-            test_args = ["test", "--ai", target_db, "-V", target_ver, "-i", modules_to_test]
-            if session_id:
-                test_args.extend(["--resume", session_id])
-
-            logger.info(f"Launching verification tests: odev {' '.join(test_args)}")
-            self.odev.run_command(*test_args)
-            if agent:
-                session_id = agent.get_latest_session_id() or session_id
 
     def _sync_knowledge(self, ki, from_ver: str, target_ver: str):
         """Sync findings back to the knowledge repo as a PR."""
@@ -533,11 +518,11 @@ class UpgradeCommand(DatabaseCommand, ListLocalDatabasesMixin, AICommandMixin):
 
         # Check for missing upgrade skills via npx skills list -g
         loaded_skills = self._get_loaded_skills()
-        missing = [s for s in ["odoo_upgrade_utils", "custom_util"] if s not in loaded_skills]
+        missing = [s for s in ["odoo_upgrade_utils", "custom_util", "odoo_upgrade_skill"] if s not in loaded_skills]
         if missing:
             logger.warning(
                 f"Missing upgrade skills: {', '.join(missing)}. "
-                "To load them, run: npx skills add odoo-ps/ps-ai-skills --skills odoo_upgrade_utils,custom_util"
+                "To load them, run: npx skills add odoo-ps/ps-ai-skills --skills odoo_upgrade_utils,custom_util,odoo_upgrade_skill"
             )
 
         if not agent.run(
@@ -550,8 +535,6 @@ class UpgradeCommand(DatabaseCommand, ListLocalDatabasesMixin, AICommandMixin):
         ):
             return
 
-        modules_to_test = ",".join([m["name"] for m in modules_info])
-        self._verification_loop(agent, modules_to_test, target_db, target_ver)
         self._sync_knowledge(ki, from_ver, target_ver)
 
     def _get_upgrade_databases(self) -> list[str]:
