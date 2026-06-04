@@ -83,6 +83,28 @@ class UpgradeCommand(DatabaseCommand, ListLocalDatabasesMixin, AICommandMixin):
         default=False,
     )
 
+    ultracode = args.Flag(
+        aliases=["--ultracode"],
+        description=(
+            "Run the AI agent in ultracode mode: inject the 'ultracode' keyword so it fans out "
+            "multi-agent workflows for substantive steps. Pair with --yolo so workflow sub-agents "
+            "are not blocked by the sandbox's restricted permissions."
+        ),
+        default=False,
+    )
+
+    effort = args.String(
+        aliases=["--effort"],
+        description=(
+            "Claude reasoning effort for this upgrade (claude CLI only). Migrations are complex, so "
+            "the default raises effort to 'high' by temporarily setting effortLevel in "
+            "~/.claude/settings.json for the run and restoring your value afterwards. Use 'keep' to "
+            "leave your global setting untouched."
+        ),
+        choices=["low", "medium", "high", "xhigh", "keep"],
+        default="high",
+    )
+
     @property
     def _database_exists_required(self) -> bool:
         return False
@@ -297,6 +319,7 @@ class UpgradeCommand(DatabaseCommand, ListLocalDatabasesMixin, AICommandMixin):
 
     def _prepare_upgrade(
         self,
+        cli: str,
     ) -> tuple[str, list[str], list[str], str, str, str, "KnowledgeIndex | None", list[dict]]:
         """Prepare the upgrade environment and generate the AI prompt."""
         from_ver, target_ver = self._detect_versions()
@@ -335,6 +358,7 @@ class UpgradeCommand(DatabaseCommand, ListLocalDatabasesMixin, AICommandMixin):
             upgrade_instructions,
             knowledge_local_path,
             modules_info,
+            cli,
         )
 
         return (
@@ -407,6 +431,7 @@ class UpgradeCommand(DatabaseCommand, ListLocalDatabasesMixin, AICommandMixin):
         upgrade_instructions: str,
         knowledge_path: str | None,
         modules_info: list[dict],
+        cli: str,
     ) -> str:
         """Compose the full AI prompt from various components."""
         project_path = Path(self.args.path).resolve()
@@ -431,8 +456,63 @@ class UpgradeCommand(DatabaseCommand, ListLocalDatabasesMixin, AICommandMixin):
             task_id=self.args.task_id,
             comment=self.args.comment,
             submodules=self.args.submodules,
+            ultracode=self.args.ultracode,
+            cli=cli,
+            yolo=self.args.yolo,
             modules=modules_info,
         )
+
+    def _sync_specialist_agents(self, cli: str) -> list[Path]:
+        """Install the plugin's specialist subagents for the chosen CLI.
+
+        For ``claude`` this copies ``agents/odoo-upg-*.md`` into
+        ``~/.claude/agents/`` so the sandboxed session discovers them and the
+        Lead can delegate via the ``Task`` tool / ``Workflow`` ``agentType``.
+        No-op for other CLIs (they receive the specialist guidance inline in the
+        prompt). Returns the list of installed paths.
+        """
+        from odev.plugins.odev_plugin_ai_upgrade.common.agents import sync_specialist_agents
+
+        installed = sync_specialist_agents(cli)
+        if installed:
+            names = ", ".join(p.stem for p in installed)
+            logger.info(f"Synced {len(installed)} specialist upgrade agent(s) to ~/.claude/agents: {names}")
+        return installed
+
+    def _apply_effort_override(self, cli: str) -> dict | None:
+        """Temporarily raise Claude's effortLevel for this run (claude CLI only).
+
+        The sandbox launch command (read-only sibling) never passes ``--effort``,
+        so the user's global ``~/.claude/settings.json`` effortLevel governs the
+        agent. Migrations want more than a casual default, so raise it here and
+        restore it in :meth:`_restore_effort_override`. ``--effort keep`` opts out.
+        """
+        if cli != "claude" or self.args.effort == "keep":
+            return None
+
+        from odev.plugins.odev_plugin_ai_upgrade.common.effort import apply_effort_override
+
+        # ultracode is max-effort multi-agent orchestration; make sure the
+        # baseline effort matches rather than fighting a low global setting.
+        level = "xhigh" if self.args.ultracode else self.args.effort
+        token = apply_effort_override(level)
+        if token:
+            prev = token["old_value"] if token["had_key"] else "default"
+            logger.info(
+                f"Raised Claude effort {prev} → {level} for this upgrade "
+                "(your ~/.claude/settings.json value is restored when it finishes)."
+            )
+        return token
+
+    def _restore_effort_override(self, token: dict | None) -> None:
+        """Restore the user's original ``effortLevel`` after the run."""
+        if not token:
+            return
+
+        from odev.plugins.odev_plugin_ai_upgrade.common.effort import restore_effort_override
+
+        restore_effort_override(token)
+        logger.debug("Restored Claude effortLevel to its pre-upgrade value.")
 
     def _check_git_safety(self, repo_path: Path):
         """Perform git safety checks on the repository."""
@@ -510,7 +590,12 @@ class UpgradeCommand(DatabaseCommand, ListLocalDatabasesMixin, AICommandMixin):
             self._check_ruff_cleanliness(repo_path)
 
         self._check_git_safety(repo_path)
-        prepared = self._prepare_upgrade()
+
+        # Resolve the AI agent first: the final CLI (favorite/interactive) decides
+        # which delegation directives the rendered prompt must carry.
+        agent = self.get_ai_agent()
+
+        prepared = self._prepare_upgrade(agent.cli)
         if not prepared:
             return
 
@@ -525,7 +610,6 @@ class UpgradeCommand(DatabaseCommand, ListLocalDatabasesMixin, AICommandMixin):
             modules_info,
         ) = prepared
         self._target_db = target_db
-        agent = self.get_ai_agent()
 
         self._cleanup_wizard(stage="pre-flight", exclude=[target_db])
 
@@ -540,19 +624,43 @@ class UpgradeCommand(DatabaseCommand, ListLocalDatabasesMixin, AICommandMixin):
                 "To load them, run: npx skills add odoo-ps/ps-ai-skills --skills odoo_upgrade_utils,custom_util"
             )
 
-        if not agent.run(
-            prompt,
-            sandbox_dirs,
-            extra_bind_dirs=extra_bind_dirs,
-            database=target_db,
-            version=target_ver,
-            resume=self.args.resume,
-        ):
-            return
+        if not self.args.yolo:
+            if self.args.ultracode:
+                logger.warning(
+                    "--ultracode is set without --yolo: the sandbox launches the AI CLI with a restricted "
+                    "--allowedTools set, so workflow sub-agents may stall on permission prompts. "
+                    "Re-run with --yolo for ultracode workflows to execute."
+                )
+            else:
+                logger.warning(
+                    "Specialist-agent delegation requires --yolo (the sandbox restricts tools without it), "
+                    "so the upgrade will run as a single agent. Re-run with --yolo to delegate XML migration, "
+                    "SHA hunting, the render gate, and knowledge curation."
+                )
 
-        modules_to_test = ",".join([m["name"] for m in modules_info])
-        self._verification_loop(agent, modules_to_test, target_db, target_ver)
-        self._sync_knowledge(ki, from_ver, target_ver)
+        # Sync the plugin's specialist subagents into ~/.claude/agents (claude only)
+        # before launching, so the sandboxed session discovers them at startup.
+        self._sync_specialist_agents(agent.cli)
+
+        # Raise Claude's effort for the run; restored in the finally below even on
+        # Ctrl-C (KeyboardInterrupt propagates through finally to run()).
+        effort_token = self._apply_effort_override(agent.cli)
+        try:
+            if not agent.run(
+                prompt,
+                sandbox_dirs,
+                extra_bind_dirs=extra_bind_dirs,
+                database=target_db,
+                version=target_ver,
+                resume=self.args.resume,
+            ):
+                return
+
+            modules_to_test = ",".join([m["name"] for m in modules_info])
+            self._verification_loop(agent, modules_to_test, target_db, target_ver)
+            self._sync_knowledge(ki, from_ver, target_ver)
+        finally:
+            self._restore_effort_override(effort_token)
 
     def _get_upgrade_databases(self) -> list[str]:
         """Return a list of local databases that look like upgrade databases."""

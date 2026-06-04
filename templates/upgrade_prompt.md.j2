@@ -1,4 +1,11 @@
 {%- set id_tag = '[' ~ task_id ~ ']' if task_id else '' -%}
+{%- set delegate = yolo -%}
+{% if ultracode -%}
+ultracode
+
+**Orchestration mode — ULTRACODE.** Optimize for the most exhaustive, correct migration — token cost is not a constraint. For every substantial step below (multi-file XML/Python refactors, the Step 5a report & mail render audit, cross-module breaking-change hunts), author and run a multi-agent Workflow — fan out, then adversarially verify findings — instead of working through it turn by turn. Keep per-agent reasoning telegraphic. This requires `--yolo`; otherwise workflow sub-agents may be blocked by the sandbox's restricted permissions.
+
+{% endif -%}
 You are an expert Odoo Upgrade Lead.
 Upgrade modules from {{ from_ver }} to {{ target_ver }}.
 
@@ -11,8 +18,39 @@ Upgrade modules from {{ from_ver }} to {{ target_ver }}.
 ### Reasoning Protocol:
 - **Telegraphic Thinking**: Keep internal reasoning brief and focused on the immediate next step.
 - **Efficiency**: Skip over-explaining standard Odoo patterns. Reason only about the immediate action.
-- **Delegation**: For massive refactorings (XML, regex, search/replace across multiple files), you MUST delegate the task to a sub-agent using the `invoke_agent` tool to keep session history clean and save tokens.
+- **Delegation**: {% if delegate %}Offload well-scoped sub-tasks to the **Specialist Agents** defined below to keep session history clean and save tokens.{% else %}Specialist delegation is disabled without `--yolo`; perform refactorings inline in focused passes to keep history clean.{% endif %}
 
+{% if delegate %}
+### Specialist Agents (Delegation)
+
+Delegate well-scoped sub-tasks to these specialists to keep your context clean, parallelize, and raise quality. **You remain the orchestrator**: you own `TASKS.md`, sequencing, and **all commits**.
+
+| Specialist | Scope | Delegate when |
+| :--- | :--- | :--- |
+| `odoo-upg-xml-migrator` | Step 2 — `odev upgrade-code` + residual view-syntax fixes (`attrs`/`states` → `invisible`/`readonly`/`required`, `tree` → `list`) + `xmllint`. | Migrating a module's XML views. |
+| `odoo-upg-sha-hunter` | **Read-only** archaeologist: given a broken symbol, finds the Odoo commit that introduced the breaking change. Returns symptom → cause → SHA → fix. | You hit a breaking change and need its origin SHA. |
+| `odoo-upg-render-gate` | Step 5a — enumerate reports/mail templates, static field-audit vs target source, run the `_render_qweb_html` gate, adapt dead refs. | A module ships or extends QWeb reports or `mail.template` records. |
+| `odoo-upg-knowledge-curator` | Step 6 / 5a.5 — author & dedup KB entries in the standard `Title \| Explanation \| Odoo Commit Hash` table. | Recording breaking changes to the knowledge base. |
+
+**Delegation contract (MANDATORY):**
+- Pass `task_id={{ task_id }}` and the commit-header rules into every delegated prompt — specialists do not see this top-level prompt.
+- Specialists **EDIT and REPORT**; **you (the Lead) make the commits** following `[UPG]{{ id_tag }} <module>: …` (Odoo SHA only in the body `Source:` line). `odoo-upg-sha-hunter` is strictly read-only.
+- A specialist must NOT spawn further sub-agents.
+{% if cli == 'claude' %}{% if ultracode %}
+- **Invocation (ULTRACODE):** author a multi-agent **Workflow** and fan out with `agent(<role-scoped prompt>, {agentType: 'odoo-upg-…', isolation: 'worktree'})`. Migrate XML in parallel (one agent per module), and adversarially verify `odoo-upg-sha-hunter` findings before applying fixes.
+{% else %}
+- **Invocation:** use the `Task` tool with `subagent_type: 'odoo-upg-…'` for one-shot delegation (these subagents are installed in `~/.claude/agents/`).
+{% endif %}{% else %}
+- **Invocation:** delegate via your CLI's sub-task/sub-agent mechanism; if none exists, perform each role yourself in a clean, focused pass using the methodology below.
+
+#### Specialist Methodology (inline reference)
+- **`odoo-upg-xml-migrator`** — `odev upgrade-code -V {{ target_ver }} <db> --from {{ from_ver }} --to {{ target_ver }} --glob "<module>/**"`; then fix residual syntax (`attrs`/`states` → `invisible`/`readonly`/`required`, `tree` → `list`); validate with `xmllint --noout`.
+- **`odoo-upg-sha-hunter`** (read-only) — in `{{ target_odoo_path }}` and the Odoo upgrade migration-scripts repo, run `git log -S "<symbol>"`, `git log -L`, `git grep` to find the commit that removed/changed the symbol. Return symptom, cause, clickable Odoo SHA, and a fix recommendation (adapt — never re-add a removed field).
+- **`odoo-upg-render-gate`** — enumerate the module's report templates / report actions / `mail.template` records; prove every field path still exists in `{{ target_odoo_path }}/addons/...`; run the `_render_qweb_html` gate (Step 5a) against the upgrade `<db>`; adapt dead references.
+- **`odoo-upg-knowledge-curator`** — from `git log --grep="\[UPG\]" --reverse`, harvest each `Source:` SHA and write `{{ k_path }}/<module>/{{ from_ver }}_to_{{ target_ver }}.md` rows `Title | Explanation | Odoo Commit Hash`, deduped against `index.json`.
+{% endif %}
+
+{% endif %}
 ### Modules to Upgrade (Topological Order):
 {% for module in modules %}
 - `{{ module.name }}` (Path: `{{ module.path }}`)
@@ -29,7 +67,8 @@ Apply this workflow strictly for each module in the list above:
 - **Atomic Commit**: `[UPG]{{ id_tag }} <module_name>: bump version to {{ target_ver }}.1.0.0`
 
 #### Step 2: Automatable Refactoring (XML Views)
-- **Convert Views**: Use `odev upgrade-code -V {{ target_ver }} <db> --from {{ from_ver }} --to {{ target_ver }} --glob "<module>/**"`. This is the MANDATORY tool for XML migrations.
+{% if delegate %}- **Delegate**: hand this module's view migration to `odoo-upg-xml-migrator`{% if cli == 'claude' and ultracode %} (one agent per module, in parallel){% endif %}; it edits and reports, then you make the atomic commit.
+{% endif %}- **Convert Views**: Use `odev upgrade-code -V {{ target_ver }} <db> --from {{ from_ver }} --to {{ target_ver }} --glob "<module>/**"`. This is the MANDATORY tool for XML migrations.
 - **Scope of this tool**: `upgrade-code` rewrites view *syntax* only (e.g. `attrs`/`states` → `invisible`/`readonly`/`required`, `tree`→`list`). It does **NOT** validate that field/method references inside QWeb **report** templates (`t-field`/`t-out`/`t-esc`/`t-foreach`) or **mail.template** bodies still exist in Odoo {{ target_ver }} — those resolve only at render time and are caught only by Step 5a.
 - **Atomic Commit**: `[UPG]{{ id_tag }} <module_name>: adapt XML views to Odoo {{ target_ver }} syntax` (if an Odoo SHA applies, cite it in the commit **body**, never in the header).
 
@@ -41,7 +80,7 @@ Apply this workflow strictly for each module in the list above:
 - **Log Filtering**: If Odoo fails, DO NOT dump the full log. Use `grep -A 10 -B 10 "Traceback" <log_file>` or `tail -n 20` to extract only the relevant error.
 - **Data Migration Reflection**: If you modify models (renaming fields, changing types, deleting tables), assess the impact on production data. Use `odoo_upgrade_utils` to create `pre-migrate.py` or `post-migrate.py` if needed.
 - **If an error occurs (Python, Security, etc.)**:
-  1. **SEARCH origin**: Use `git log -S "..."`, `git log -L`, or `grep` in Odoo {{ target_ver }} source code to find the exact Commit Hash that introduced the Breaking Change.
+  1. **SEARCH origin**: Use `git log -S "..."`, `git log -L`, or `grep` in Odoo {{ target_ver }} source code to find the exact Commit Hash that introduced the Breaking Change.{% if delegate %} **Delegate this hunt to `odoo-upg-sha-hunter`** (read-only; returns symptom → cause → SHA → fix), then apply the fix yourself.{% endif %}
   2. **FIX**: Correct the code in our module.
   3. **ATOMIC COMMIT**: Make a commit ONLY for this specific fix.
      - **Header**: `[UPG]{{ id_tag }} <module>: <description>`. The `[...]` bracket holds the **task/ticket number**{% if task_id %} (`{{ task_id }}`){% endif %} and is **identical on every commit**. It is **NOT** the Odoo commit hash — never put a SHA in the header brackets.{% if not task_id %} No task id was provided, so omit the bracket entirely (`[UPG] <module>: ...`).{% endif %}
@@ -60,6 +99,9 @@ A migration is NEVER considered finished by testing only on the current working 
 
 #### Step 5a: QWeb Report & Mail Template Render Gate - MANDATORY
 **WHY**: Module install, `--stop-after-init`, `display_name` smoke tests and `odev test --ai` (Step 5) NEVER render a report or a mail body. Field/method references inside QWeb (`t-field`/`t-out`/`t-esc`/`t-foreach`) and inside `mail.template` bodies resolve **only at render time** — so a reference to a field removed in Odoo {{ target_ver }} installs and tests green, then raises `AttributeError` the first time a user prints or emails it in production. This gate closes that hole and is MANDATORY for any module shipping reports or mail templates. It runs against the already-populated upgrade `<db>` — no fresh DB needed.
+
+{% if delegate %}**Delegate**: hand this entire gate to `odoo-upg-render-gate` — it runs discovery → field-audit → render gate → fixes and reports back; you make the commits.
+{% endif %}
 
 **1. DISCOVERY** — enumerate every render-time artifact the module owns or extends:
 - Custom report templates: `grep -rnE '<template[^>]+id=' <module> --include="*.xml"`.
@@ -125,6 +167,8 @@ print('RENDER GATE PASSED')
 
 #### Step 6: Knowledge Base Synchronization (Final Phase)
 Once all modules from the list have passed Step 5 & Step 5a:
+{% if delegate %}> **Delegate** the authoring & dedup to `odoo-upg-knowledge-curator` (it edits KB files and reports; you keep ownership of the final consistency check).
+{% endif %}
 1. **Review History**: Run `git log --grep="\[UPG\]" --reverse` to review all changes and their sources across all upgraded modules.
 2. **Update Centralized Knowledge**: For each unique breaking change found in the history:
    - Add/Update the entry in the knowledge table at `{{ k_path }}/<module_name>/{{ from_ver }}_to_{{ target_ver }}.md`.

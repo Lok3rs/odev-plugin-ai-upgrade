@@ -1,0 +1,6 @@
+coverage
+jinja2
+pytest
+pytest-cov
+pyyaml
+testfixtures
