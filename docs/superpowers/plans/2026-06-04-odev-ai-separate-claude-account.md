@@ -567,6 +567,10 @@ Replace the body of `get_latest_session_id` (lines 235-253) with a handler-drive
         """Return the ID of the most recent session for this agent CLI."""
         try:
             home = Path.home()
+            # Preserve the original CLI allowlist: only these resolve a sessions
+            # file; everything else (e.g. copilot) returns None as before.
+            if self.cli not in ("gemini", "claude", "opencode-cli"):
+                return None
             config_rel = self.handler.get_agent_config_rel_path()
             if not config_rel:
                 return None
@@ -582,7 +586,7 @@ Replace the body of `get_latest_session_id` (lines 235-253) with a handler-drive
         return None
 ```
 
-> Equivalence check: gemini→`~/.gemini/sessions.json` (was hardcoded the same); claude→`~/.claude/sessions.json` default (was the same) or `~/<override>/sessions.json` (new, correct); opencode-cli→`~/.claude/sessions.json` (handler returns `.claude` since `cli != "claude"`, same as before); copilot→`None` (handler returns `None`, same as the old `else`).
+> Equivalence check: gemini→`~/.gemini/sessions.json` (was hardcoded the same); claude→`~/.claude/sessions.json` default (was the same) or `~/<override>/sessions.json` (new, correct); opencode-cli→`~/.claude/sessions.json` (handler returns `.claude` since `cli != "claude"`, same as before); copilot→`None` (excluded by the CLI allowlist — note `CopilotHandler.get_agent_config_rel_path()` actually returns `.copilot`, so the allowlist guard, not the handler, is what preserves the old `else` behavior).
 
 - [ ] **Step 4: Verify the module parses**
 
