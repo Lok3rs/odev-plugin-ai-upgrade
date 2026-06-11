@@ -31,6 +31,7 @@ EXPECTED = {
     "odoo-upg-render-gate.md",
     "odoo-upg-xml-migrator.md",
     "odoo-upg-knowledge-curator.md",
+    "odoo-upg-studio-views.md",
 }
 
 

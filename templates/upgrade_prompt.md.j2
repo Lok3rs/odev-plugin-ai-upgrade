@@ -33,6 +33,8 @@ Delegate well-scoped sub-tasks to these specialists to keep your context clean, 
 | `odoo-upg-sha-hunter` | **Read-only** archaeologist: given a broken symbol, finds the Odoo commit that introduced the breaking change. Returns symptom → cause → SHA → fix. | You hit a breaking change and need its origin SHA. |
 | `odoo-upg-render-gate` | Step 5a — enumerate reports/mail templates, static field-audit vs target source, run the `_render_qweb_html` gate, adapt dead refs. | A module ships or extends QWeb reports or `mail.template` records. |
 | `odoo-upg-knowledge-curator` | Step 6 / 5a.5 — author & dedup KB entries in the standard `Title \| Explanation \| Odoo Commit Hash` table. | Recording breaking changes to the knowledge base. |
+{% if studio_views_dump %}| `odoo-upg-studio-views` | Step 2b — load the views-only customer extract, migrate Studio view archs, run the studio validation gate, write the migration artifacts. | A views-only DB extract is available (`--studio-views`). |
+{% endif %}
 
 **Delegation contract (MANDATORY):**
 - Pass `task_id={{ task_id }}` and the commit-header rules into every delegated prompt — specialists do not see this top-level prompt.
@@ -50,6 +52,8 @@ Delegate well-scoped sub-tasks to these specialists to keep your context clean, 
 - **`odoo-upg-sha-hunter`** (read-only) — in `{{ target_odoo_path }}` and the Odoo upgrade migration-scripts repo, run `git log -S "<symbol>"`, `git log -L`, `git grep` to find the commit that removed/changed the symbol. Return symptom, cause, clickable Odoo SHA, and a fix recommendation (adapt — never re-add a removed field).
 - **`odoo-upg-render-gate`** — enumerate the module's report templates / report actions / `mail.template` records; prove every field path still exists in `{{ target_odoo_path }}/addons/...`; run the `_render_qweb_html` gate (Step 5a) against the upgrade `<db>`; adapt dead references.
 - **`odoo-upg-knowledge-curator`** — from `git log --grep="\[UPG\]" --reverse`, harvest each `Source:` SHA and write `{{ k_path }}/<module>/{{ from_ver }}_to_{{ target_ver }}.md` rows `Title | Explanation | Odoo Commit Hash`, deduped against `index.json`.
+{% if studio_views_dump %}- **`odoo-upg-studio-views`** — load the views extract into a scratch DB; identify studio views via `ir_model_data.module='studio_customization'`; migrate archs with Step 2 rules; recreate `x_studio_*` fields as manual records and gate-create each arch in a rolled-back transaction on the fresh target DB; write `studio_views/` artifacts.
+{% endif %}
 {% endif %}
 
 {% endif %}
@@ -76,8 +80,10 @@ Apply this workflow strictly for each module in the list above:
 
 {% if studio_views_dump %}
 #### Step 2b: Studio Views Migration (database-stored views) — run ONCE, not per module
-Studio customizations live in the customer database (`ir_ui_view.arch_db`), not in module source files. A views-only extract is available at `{{ studio_views_dump }}` (tables: {{ studio_views_tables | join(', ') }}).
+Studio customizations live in the customer database (`ir_ui_view.arch_db`), not in module source files. A views-only extract is available at `{{ studio_views_dump }}` (tables: {{ studio_views_tables | join(', ') }}; on website-enabled databases, website page views are excluded from the extract).
 
+{% if delegate %}- **Delegate**: hand this entire step to `odoo-upg-studio-views` — it loads the extract, migrates the archs, runs the studio validation gate and writes the artifacts; you make the commit. Note: its validation gate (sub-step 4) needs the fresh target-version DB from Step 5 — run the gate once that DB exists.
+{% endif %}
 1. **Load the extract** into a scratch database in your ephemeral PostgreSQL cluster (NOT the upgrade `<db>`):
    ```bash
    psql -d postgres -c 'CREATE DATABASE studio_views_src;'
@@ -86,8 +92,9 @@ Studio customizations live in the customer database (`ir_ui_view.arch_db`), not 
    FK-constraint errors referencing absent tables (`res_users`, ...) are EXPECTED and ignorable — the table data still loads.
 2. **Identify studio views**: `SELECT v.id, v.name, v.model, v.arch_db FROM ir_ui_view v JOIN ir_model_data d ON d.model = 'ir.ui.view' AND d.res_id = v.id WHERE d.module = 'studio_customization';` (fallback heuristic: `v.name LIKE 'Odoo Studio:%'`).
 3. **Migrate each arch**: apply the same syntax rules as Step 2 (`attrs`/`states` → `invisible`/`readonly`/`required`, `tree` → `list`) to each `arch_db`. Use `ir_model` / `ir_model_fields` from the extract to verify that `x_studio_*` field references still resolve; flag references to standard fields removed in {{ target_ver }} the same way as in Step 3.
-4. **Write artifacts**: save each migrated arch as XML under `{{ project_path }}/studio_views/` and produce `{{ project_path }}/studio_views/studio_views_migration.sql` with one `UPDATE ir_ui_view SET arch_db = ... WHERE id = ...;` per view, to be applied to the customer's upgraded database.
-5. **Atomic Commit**: `[UPG]{{ id_tag }} studio_views: adapt Studio view archs to {{ target_ver }}`
+4. **Validation gate** (transaction rolled back; run AFTER Step 5 created the fresh target-version DB): Studio archs reference `x_studio_*` fields that do not exist in a fresh database, so the gate script (`odev shell -V {{ target_ver }} <test_db> --script /tmp/studio_gate.py`) must first recreate the Studio models/fields as **manual** records from the extract's `ir_model`/`ir_model_fields` metadata, then `env['ir.ui.view'].create(...)` each migrated arch (full validation against the target registry), collect failures, and `env.cr.rollback()`. SKIP and note views whose parent view does not exist in a bare install. Fix genuine dead references and re-run until the gate passes.
+5. **Write artifacts** under `{{ project_path }}/studio_views/`: each migrated arch as XML (for review), and the migration to apply on the customer's upgraded database — **prefer `odoo_upgrade_utils`/`custom_util` helpers** where one fits (in `post-migrate.py`); use plain SQL UPDATEs (`studio_views_migration.sql`, one `UPDATE ir_ui_view SET arch_db = ... WHERE id = ...;` per view) for changes with no suitable helper.
+6. **Atomic Commit**: `[UPG]{{ id_tag }} studio_views: adapt Studio view archs to {{ target_ver }}`
 {% endif %}
 #### Step 3: Iterative Resolution (Python & Security)
 - **Fail Fast (Static Validation)**: Before launching Odoo, validate your changes:

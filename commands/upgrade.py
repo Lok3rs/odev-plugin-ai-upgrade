@@ -32,6 +32,11 @@ logger = logging.getLogger(__name__)
 # transactional customer data.
 STUDIO_VIEWS_TABLES: list[str] = ["ir_ui_view", "ir_model_data", "ir_model", "ir_model_fields"]
 
+# Row filter applied to ir_ui_view on website-enabled databases: website page views hold
+# customer content (marketing copy). Catches COW copies via website_id (column added by the
+# website module) and pages via website_page.view_id.
+WEBSITE_VIEWS_FILTER = "website_id IS NULL AND id NOT IN (SELECT view_id FROM website_page)"
+
 
 class UpgradeCommand(DatabaseCommand, ListLocalDatabasesMixin, AICommandMixin):
     """Upgrades an Odoo module from a previous version to a new version using an AI model.
@@ -329,18 +334,16 @@ class UpgradeCommand(DatabaseCommand, ListLocalDatabasesMixin, AICommandMixin):
             ):
                 raise self.error("Studio views extraction aborted")
 
+        where = None
         website_installed = self._database.query(
             "SELECT 1 FROM ir_module_module WHERE name = 'website' AND state = 'installed'"
         )
         if website_installed:
-            logger.warning(
-                f"The website module is installed in {self._database.name!r}: ir_ui_view includes "
-                "website page content (customer copy), which cannot be filtered out of a table-level dump."
+            where = {"ir_ui_view": WEBSITE_VIEWS_FILTER}
+            logger.info(
+                f"The website module is installed in {self._database.name!r}: website page views "
+                "(customer content) are excluded from the extract."
             )
-            if not (self.args.yolo or self.args.headless) and not self.console.confirm(
-                "Share ir_ui_view including website pages with the AI?", default=False
-            ):
-                raise self.error("Studio views extraction aborted")
 
         # Dedicated, pre-cleaned directory: binding dumps_path itself would expose every
         # other dump to the sandbox, and stale files from previous runs must not be visible.
@@ -351,7 +354,7 @@ class UpgradeCommand(DatabaseCommand, ListLocalDatabasesMixin, AICommandMixin):
         if dump_dir.exists():
             shutil.rmtree(dump_dir)
 
-        dump_file = self._database.dump(tables=STUDIO_VIEWS_TABLES, path=dump_dir)
+        dump_file = self._database.dump(tables=STUDIO_VIEWS_TABLES, path=dump_dir, where=where)
         extra_bind_dirs.append(str(dump_dir))
         logger.info(f"Studio views extracted to {dump_file}")
         return dump_file

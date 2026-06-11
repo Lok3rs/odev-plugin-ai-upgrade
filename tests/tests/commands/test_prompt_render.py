@@ -110,6 +110,16 @@ def test_studio_views_section_renders_with_dump():
     assert dump in out
     assert "ir_ui_view, ir_model_data, ir_model, ir_model_fields" in out
     assert "module = 'studio_customization'" in out
+    # yolo + dump: the specialist appears in the roster and Step 2b delegates to it
+    assert "`odoo-upg-studio-views`" in out
+    assert "hand this entire step to `odoo-upg-studio-views`" in out
+
+
+def test_studio_views_no_delegation_without_yolo():
+    out = _render("claude", yolo=False, ultracode=False, studio_views_dump="/dumps/x.sql")
+    assert STUDIO_SECTION in out  # the step itself stays
+    assert "hand this entire step to `odoo-upg-studio-views`" not in out
+    assert "### Specialist Agents (Delegation)" not in out
 
 
 @pytest.mark.parametrize("yolo", [False, True])
@@ -118,3 +128,4 @@ def test_studio_views_section_absent_without_dump(cli, yolo):
     out = _render(cli, yolo=yolo, ultracode=False)
     assert STUDIO_SECTION not in out
     assert STUDIO_SETUP not in out
+    assert "odoo-upg-studio-views" not in out

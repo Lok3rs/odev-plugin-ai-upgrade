@@ -17,6 +17,7 @@ EXPECTED = {
     "odoo-upg-render-gate",
     "odoo-upg-xml-migrator",
     "odoo-upg-knowledge-curator",
+    "odoo-upg-studio-views",
 }
 ALLOWED_TOOLS = {
     "Read",
@@ -27,6 +28,7 @@ ALLOWED_TOOLS = {
     "Bash(grep:*)",
     "Bash(rtk:*)",
     "Bash(odev:*)",
+    "Bash(psql:*)",
     "Bash(xmllint:*)",
 }
 
