@@ -26,6 +26,13 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+# Tables shared with the AI when --studio-views is set: view archs (ir_ui_view) plus the
+# metadata needed to identify studio records (ir_model_data, module='studio_customization')
+# and to verify x_studio_* field references (ir_model, ir_model_fields). None of these hold
+# transactional customer data.
+STUDIO_VIEWS_TABLES: list[str] = ["ir_ui_view", "ir_model_data", "ir_model", "ir_model_fields"]
+
+
 class UpgradeCommand(DatabaseCommand, ListLocalDatabasesMixin, AICommandMixin):
     """Upgrades an Odoo module from a previous version to a new version using an AI model.
 
@@ -103,6 +110,15 @@ class UpgradeCommand(DatabaseCommand, ListLocalDatabasesMixin, AICommandMixin):
         ),
         choices=["low", "medium", "high", "xhigh", "keep"],
         default="high",
+    )
+
+    studio_views = args.Flag(
+        aliases=["--studio-views"],
+        description=(
+            "Extract Studio view customizations (views-related tables only) from the source "
+            "database and expose them to the AI sandbox. No transactional customer data is shared."
+        ),
+        default=False,
     )
 
     @property
@@ -289,6 +305,57 @@ class UpgradeCommand(DatabaseCommand, ListLocalDatabasesMixin, AICommandMixin):
         ]
         return target_db, sandbox_dirs, extra_bind_dirs
 
+    def _extract_studio_views(self, extra_bind_dirs: list[str]) -> Path | None:
+        """Dump views-related tables of the source database into an AI-safe artifact.
+
+        The dump contains only view archs and model/field metadata (no transactional
+        customer data, see STUDIO_VIEWS_TABLES) and its directory is bind-mounted into
+        the AI sandbox. Returns the dump file path, or None when --studio-views is not set.
+        """
+        if not self.args.studio_views:
+            return None
+
+        if not (getattr(self, "_database", None) and self._database.platform.name == "local"):
+            raise self.error("--studio-views requires a local source database argument")
+
+        if not self._database_is_neutralized(self._database):
+            logger.warning(
+                f"Source database {self._database.name!r} is not neutralized. Only these tables "
+                f"will be shared with the AI: {', '.join(STUDIO_VIEWS_TABLES)} "
+                "(view archs and model/field metadata, no transactional data)."
+            )
+            if not (self.args.yolo or self.args.headless) and not self.console.confirm(
+                "Extract these tables for the AI anyway?", default=False
+            ):
+                raise self.error("Studio views extraction aborted")
+
+        website_installed = self._database.query(
+            "SELECT 1 FROM ir_module_module WHERE name = 'website' AND state = 'installed'"
+        )
+        if website_installed:
+            logger.warning(
+                f"The website module is installed in {self._database.name!r}: ir_ui_view includes "
+                "website page content (customer copy), which cannot be filtered out of a table-level dump."
+            )
+            if not (self.args.yolo or self.args.headless) and not self.console.confirm(
+                "Share ir_ui_view including website pages with the AI?", default=False
+            ):
+                raise self.error("Studio views extraction aborted")
+
+        # Dedicated, pre-cleaned directory: binding dumps_path itself would expose every
+        # other dump to the sandbox, and stale files from previous runs must not be visible.
+        dump_dir = (self.odev.dumps_path / "studio-views" / self._database.name).resolve()
+        if not dump_dir.is_relative_to(self.odev.dumps_path.resolve()):
+            # A database name with '/' or '..' must not move the rmtree/bind target around.
+            raise self.error(f"Database name {self._database.name!r} resolves outside the dumps directory")
+        if dump_dir.exists():
+            shutil.rmtree(dump_dir)
+
+        dump_file = self._database.dump(tables=STUDIO_VIEWS_TABLES, path=dump_dir)
+        extra_bind_dirs.append(str(dump_dir))
+        logger.info(f"Studio views extracted to {dump_file}")
+        return dump_file
+
     def _get_modules_info(self) -> list[dict]:
         """Resolve list of modules to upgrade, including submodules if requested."""
         search_paths = []
@@ -331,6 +398,7 @@ class UpgradeCommand(DatabaseCommand, ListLocalDatabasesMixin, AICommandMixin):
         target_db, sandbox_dirs, extra_bind_dirs = self._get_sandbox_config(
             target_ver, project_path, worktrees_path, venvs_path
         )
+        studio_views_dump = self._extract_studio_views(extra_bind_dirs)
         modules_info = self._get_modules_info()
 
         upgrade_instructions = self._setup_upgrade_instructions(upgrade_path, extra_bind_dirs)
@@ -359,6 +427,7 @@ class UpgradeCommand(DatabaseCommand, ListLocalDatabasesMixin, AICommandMixin):
             knowledge_local_path,
             modules_info,
             cli,
+            studio_views_dump,
         )
 
         return (
@@ -432,6 +501,7 @@ class UpgradeCommand(DatabaseCommand, ListLocalDatabasesMixin, AICommandMixin):
         knowledge_path: str | None,
         modules_info: list[dict],
         cli: str,
+        studio_views_dump: Path | None = None,
     ) -> str:
         """Compose the full AI prompt from various components."""
         project_path = Path(self.args.path).resolve()
@@ -460,6 +530,8 @@ class UpgradeCommand(DatabaseCommand, ListLocalDatabasesMixin, AICommandMixin):
             cli=cli,
             yolo=self.args.yolo,
             modules=modules_info,
+            studio_views_dump=str(studio_views_dump) if studio_views_dump else None,
+            studio_views_tables=STUDIO_VIEWS_TABLES,
         )
 
     def _sync_specialist_agents(self, cli: str) -> list[Path]:
@@ -612,6 +684,27 @@ class UpgradeCommand(DatabaseCommand, ListLocalDatabasesMixin, AICommandMixin):
         self._target_db = target_db
 
         self._cleanup_wizard(stage="pre-flight", exclude=[target_db])
+
+        # With --studio-views the views-only dump is the only customer-DB artifact meant to
+        # reach the AI; an existing host database named like the target would be cloned
+        # wholesale into the sandbox and defeat the extraction.
+        if self.args.studio_views:
+            from odev.common.databases import LocalDatabase
+
+            existing_target = LocalDatabase(target_db)
+            if existing_target.exists:
+                logger.warning(
+                    f"Local database {target_db!r} already exists and would be cloned wholesale "
+                    "into the AI sandbox, bypassing the --studio-views extraction."
+                )
+                if self.args.headless:
+                    raise self.error(f"Drop database {target_db!r} first or run without --headless")
+                if self.console.confirm(f"Drop database {target_db!r} before starting?", default=True):
+                    existing_target.drop()
+                elif not self.console.confirm(
+                    "Continue anyway? The full database clone will be exposed to the AI.", default=False
+                ):
+                    raise self.error("Upgrade aborted")
 
         logger.info(f"Starting Project-wide AI Upgrade: from {from_ver} to {target_ver} ({target_db})")
 

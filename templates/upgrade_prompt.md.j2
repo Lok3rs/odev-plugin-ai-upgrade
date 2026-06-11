@@ -14,6 +14,8 @@ Upgrade modules from {{ from_ver }} to {{ target_ver }}.
 ### Setup:
 - **Paths**: Source ({{ from_ver }}): `{{ from_odoo_path }}`, Target ({{ target_ver }}): `{{ target_odoo_path }}`, Project: `{{ project_path }}`.
 - **Knowledge Base**: `{{ k_path }}`. Read relevant entries before starting. {{ upgrade_instructions }}
+{% if studio_views_dump %}- **Studio Views (customer DB extract)**: `{{ studio_views_dump }}` — a SQL dump containing ONLY these tables from the customer database: {{ studio_views_tables | join(', ') }} (view archs and model/field metadata). This is the ONLY customer-database artifact available to you; do NOT expect any other customer data in your environment. Processed in Step 2b.
+{% endif %}
 
 ### Reasoning Protocol:
 - **Telegraphic Thinking**: Keep internal reasoning brief and focused on the immediate next step.
@@ -72,6 +74,21 @@ Apply this workflow strictly for each module in the list above:
 - **Scope of this tool**: `upgrade-code` rewrites view *syntax* only (e.g. `attrs`/`states` → `invisible`/`readonly`/`required`, `tree`→`list`). It does **NOT** validate that field/method references inside QWeb **report** templates (`t-field`/`t-out`/`t-esc`/`t-foreach`) or **mail.template** bodies still exist in Odoo {{ target_ver }} — those resolve only at render time and are caught only by Step 5a.
 - **Atomic Commit**: `[UPG]{{ id_tag }} <module_name>: adapt XML views to Odoo {{ target_ver }} syntax` (if an Odoo SHA applies, cite it in the commit **body**, never in the header).
 
+{% if studio_views_dump %}
+#### Step 2b: Studio Views Migration (database-stored views) — run ONCE, not per module
+Studio customizations live in the customer database (`ir_ui_view.arch_db`), not in module source files. A views-only extract is available at `{{ studio_views_dump }}` (tables: {{ studio_views_tables | join(', ') }}).
+
+1. **Load the extract** into a scratch database in your ephemeral PostgreSQL cluster (NOT the upgrade `<db>`):
+   ```bash
+   psql -d postgres -c 'CREATE DATABASE studio_views_src;'
+   psql -d studio_views_src -f {{ studio_views_dump }}
+   ```
+   FK-constraint errors referencing absent tables (`res_users`, ...) are EXPECTED and ignorable — the table data still loads.
+2. **Identify studio views**: `SELECT v.id, v.name, v.model, v.arch_db FROM ir_ui_view v JOIN ir_model_data d ON d.model = 'ir.ui.view' AND d.res_id = v.id WHERE d.module = 'studio_customization';` (fallback heuristic: `v.name LIKE 'Odoo Studio:%'`).
+3. **Migrate each arch**: apply the same syntax rules as Step 2 (`attrs`/`states` → `invisible`/`readonly`/`required`, `tree` → `list`) to each `arch_db`. Use `ir_model` / `ir_model_fields` from the extract to verify that `x_studio_*` field references still resolve; flag references to standard fields removed in {{ target_ver }} the same way as in Step 3.
+4. **Write artifacts**: save each migrated arch as XML under `{{ project_path }}/studio_views/` and produce `{{ project_path }}/studio_views/studio_views_migration.sql` with one `UPDATE ir_ui_view SET arch_db = ... WHERE id = ...;` per view, to be applied to the customer's upgraded database.
+5. **Atomic Commit**: `[UPG]{{ id_tag }} studio_views: adapt Studio view archs to {{ target_ver }}`
+{% endif %}
 #### Step 3: Iterative Resolution (Python & Security)
 - **Fail Fast (Static Validation)**: Before launching Odoo, validate your changes:
   1. Python: `ruff check path/to/file.py --select E999,F821,F822,F405`. DO NOT fix other lint errors.

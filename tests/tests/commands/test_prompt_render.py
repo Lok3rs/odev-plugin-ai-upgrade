@@ -18,7 +18,7 @@ def _plugin_root() -> Path:
     raise RuntimeError("Could not locate the plugin root (no __manifest__.py found).")
 
 
-def _render(cli: str, yolo: bool, ultracode: bool) -> str:
+def _render(cli: str, yolo: bool, ultracode: bool, studio_views_dump: str | None = None) -> str:
     template_path = _plugin_root() / "templates" / "upgrade_prompt.md.j2"
     template = jinja2.Template(template_path.read_text(encoding="utf-8"))
     return template.render(
@@ -38,6 +38,8 @@ def _render(cli: str, yolo: bool, ultracode: bool) -> str:
         cli=cli,
         yolo=yolo,
         modules=[{"name": "sale_x", "path": "/proj/sale_x"}],
+        studio_views_dump=studio_views_dump,
+        studio_views_tables=["ir_ui_view", "ir_model_data", "ir_model", "ir_model_fields"],
     )
 
 
@@ -94,3 +96,25 @@ def test_non_claude_yolo_gets_inline_methodology(cli):
     assert TASK_TOOL not in out
     assert "agentType" not in out
     assert "delegate via your CLI's sub-task/sub-agent mechanism" in out
+
+
+STUDIO_SECTION = "#### Step 2b: Studio Views Migration"
+STUDIO_SETUP = "**Studio Views (customer DB extract)**"
+
+
+def test_studio_views_section_renders_with_dump():
+    dump = "/dumps/studio-views/mydb/20260611-mydb.dump.4-tables.sql"
+    out = _render("claude", yolo=True, ultracode=False, studio_views_dump=dump)
+    assert STUDIO_SECTION in out
+    assert STUDIO_SETUP in out
+    assert dump in out
+    assert "ir_ui_view, ir_model_data, ir_model, ir_model_fields" in out
+    assert "module = 'studio_customization'" in out
+
+
+@pytest.mark.parametrize("yolo", [False, True])
+@pytest.mark.parametrize("cli", ["claude", "gemini"])
+def test_studio_views_section_absent_without_dump(cli, yolo):
+    out = _render(cli, yolo=yolo, ultracode=False)
+    assert STUDIO_SECTION not in out
+    assert STUDIO_SETUP not in out
